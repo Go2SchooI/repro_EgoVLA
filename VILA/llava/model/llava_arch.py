@@ -33,11 +33,16 @@ from llava.model.language_model.builder import build_llm_and_tokenizer
 from llava.model.multimodal_encoder.builder import build_vision_tower
 from llava.model.multimodal_projector.builder import build_mm_projector
 from llava.model.utils import get_model_config
-from llava.train.sequence_parallel import get_pg_manager
 from llava.utils.media import extract_media
 from llava.utils.tokenizer import infer_stop_tokens, tokenize_conversation
 
 from llava.model.ego_vla_decoder.builder import build_traj_decoder
+
+try:
+    from llava.train.sequence_parallel import get_pg_manager
+except ImportError:
+    def get_pg_manager():
+        return None
 
 # TODO decide whether should we use metaclass
 class LlavaMetaModel(ABC):

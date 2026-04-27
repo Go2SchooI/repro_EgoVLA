@@ -26,7 +26,6 @@ from llava.model.loss import soft_cross_entropy
 from llava.model.utils.packing import set_seqlens_in_batch
 from llava.utils import distributed as dist
 
-from ...train.utils import calculate_loss_weight
 from ..configuration_llava import LlavaConfig
 from ..llava_arch import LlavaMetaForCausalLM, LlavaMetaModel
 
@@ -131,16 +130,6 @@ class LlavaLlamaConfig(LlavaConfig):
       self.traj_decoder_type = traj_decoder_type
       self.pred_head = pred_head
 
-
-from human_plan.utils.mano.model import (
-  mano_left,
-  mano_right
-)
-from human_plan.utils.mano.forward import mano_forward
-
-from .geodesic_loss import geodesic_loss
-from pytorch3d.transforms import so3_exp_map, axis_angle_to_matrix
-from pytorch3d.transforms import axis_angle_to_quaternion, matrix_to_axis_angle
 
 from .rotation_convert import rot6d_to_rotmat, batch_axis2matrix, batch_matrix2axis
 # FIXME we will follow the convention to add a new class for CausalLM in the future
@@ -268,6 +257,8 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
 
         # Loss rescale for SP & DP loss match
         if dist.size() > 1:
+            from ...train.utils import calculate_loss_weight
+
             loss_weight = calculate_loss_weight(labels)
             outputs.loss = outputs.loss * loss_weight
 
@@ -351,6 +342,10 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
         if raw_action_labels is not None:
           raw_label = raw_action_labels
           raw_label_mask = raw_action_masks
+
+          # Training-only losses depend on MANO and pytorch3d. Import them lazily so
+          # inference in the simulation environment does not require those packages.
+          from pytorch3d.transforms import axis_angle_to_matrix, axis_angle_to_quaternion
 
           ### compute losses
           assert self.config.action_output_ee_dim is not None
@@ -473,6 +468,9 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
             ee_rot_loss_single = ee_rot_loss_single[raw_label_mask_rot_single].mean()
           elif self.config.ee_rot_representation == "rotvec":
             assert False
+            from .geodesic_loss import geodesic_loss
+            from pytorch3d.transforms import so3_exp_map
+
             q_pred = prediction[..., -self.config.action_output_ee_rot_dim:]
             q_label = raw_label[..., -self.config.action_output_ee_rot_dim:]
             raw_label_mask_rot_single = raw_label_mask[..., -self.config.action_output_ee_rot_dim:]
@@ -521,6 +519,9 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
 
           if self.config.hand_kp_loss_coeff > 0:
             assert self.config.merge_hand
+            from human_plan.utils.mano.forward import mano_forward
+            from human_plan.utils.mano.model import mano_left, mano_right
+
             mano_left.to(hand_label_component.device).to(hand_label_component.dtype)
             mano_right.to(hand_label_component.device).to(hand_label_component.dtype)
 

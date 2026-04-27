@@ -10,15 +10,6 @@ from llava.model.builder import load_pretrained_model
 from llava.mm_utils import get_model_name_from_path
 
 from llava import conversation as conversation_lib
-from llava.train.train import (
-    maybe_zero_3,
-    get_peft_state_maybe_zero_3,
-    get_peft_state_non_lora_maybe_zero_3,
-    get_mm_adapter_state_maybe_zero_3,
-    find_all_linear_names,
-    safe_save_model_for_hf_trainer,
-    smart_tokenizer_and_embedding_resize
-)
 from llava.constants import (
     DEFAULT_IM_END_TOKEN,
     DEFAULT_IM_START_TOKEN,
@@ -26,6 +17,26 @@ from llava.constants import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
 )
+
+
+def smart_tokenizer_and_embedding_resize(
+    special_tokens_dict,
+    tokenizer,
+    model,
+):
+  """Eval-only copy to avoid importing llava.train.train and its training deps."""
+  num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
+  model.resize_token_embeddings(len(tokenizer))
+
+  if num_new_tokens > 0:
+    input_embeddings = model.get_input_embeddings().weight.data
+    output_embeddings = model.get_output_embeddings().weight.data
+
+    input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+    output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+
+    input_embeddings[-num_new_tokens:] = input_embeddings_avg
+    output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
 def load_model_eval(model_args, data_args, training_args):
   training_args.run_name = training_args.output_dir.split("/")[-1]

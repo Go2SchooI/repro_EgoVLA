@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 # Define an array of strings (arguments)
 task_names = [
@@ -38,7 +39,11 @@ smooth_weight = "0.2"
 hand_smooth_weight = "0.8"
 
 # Path to your Bash script
-script_path = "human_plan/ego_bench_eval/scripts/aug_shift_30hz/fullpretrain_p30_h5_transv2.sh"  # Update this to your script's path
+repo_root = Path(__file__).resolve().parents[2]
+script_path = repo_root / "human_plan" / "ego_bench_eval" / "fullpretrain_p30_h5_transv2.sh"
+
+if not script_path.exists():
+  raise FileNotFoundError(f"Missing eval script: {script_path}")
 
 project_trajs = "0"
 save_frames = "0"
@@ -61,10 +66,11 @@ for task_name in tqdm(task_names, desc="Task Name"):
             "bash", script_path, task_name, room_idx, table_idx, smooth_weight, str(num_episodes), str(num_trials), result_saving_path, save_frames, project_trajs, hand_smooth_weight, video_saving_path, additional_label, use_per_step_instruction
           )
           result = subprocess.run(
-              ["bash", script_path, task_name, room_idx, table_idx, smooth_weight, str(num_episodes), str(num_trials), result_saving_path, save_frames, project_trajs, hand_smooth_weight, video_saving_path, additional_label, use_per_step_instruction ],  # Command to run the Bash script
+              ["bash", str(script_path), task_name, room_idx, table_idx, smooth_weight, str(num_episodes), str(num_trials), result_saving_path, save_frames, project_trajs, hand_smooth_weight, video_saving_path, additional_label, use_per_step_instruction ],  # Command to run the Bash script
               capture_output=True,          # Capture the output
               text=True,                    # Return output as string
-              check=True                    # Raise an error if the command fails
+              check=True,                   # Raise an error if the command fails
+              cwd=repo_root
           )
       except subprocess.CalledProcessError as e:
           print(f"Error for '{task_name} {room_idx}':\n{e.stderr}")

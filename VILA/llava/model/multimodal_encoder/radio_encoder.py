@@ -25,10 +25,17 @@ from PIL import Image
 from transformers import AutoConfig, AutoModel, CLIPVisionConfig
 
 from llava.model.multimodal_encoder.vision_encoder import VisionTower
-from llava.train.utils import mprint, rprint
 
 from .image_processor import ImageProcessor
-from .visualize_features import get_pca_map
+
+try:
+    from llava.train.utils import mprint, rprint
+except ImportError:
+    def rprint(*args, **kwargs):
+        return print(*args, **kwargs)
+
+    def mprint(*args, **kwargs):
+        return print(*args, **kwargs)
 
 
 def get_prefix_state_dict(state_dict: Dict[str, Any], prefix: str):
@@ -101,7 +108,7 @@ class RADIOVisionTower(VisionTower):
             raise ValueError("Delay load not supported for RADIOVisionTower.")
 
         self.sample_count = 0
-        self.debug = True
+        self.debug = False
 
     def get_hidden_size(self):
         if self.select_feature == "cls":
@@ -288,6 +295,8 @@ class RADIOVisionTower(VisionTower):
         spatial_features = spatial_features.permute(0, 3, 1, 2)  # B, C, H/patch_size, W/patch_size
 
         if self.debug and is_rank0() and self.sample_count % 1000 == 0:
+            from .visualize_features import get_pca_map
+
             spatial_features_hwc = spatial_features.permute(0, 2, 3, 1)
             # create the debug directory
             os.makedirs("radio-debug", exist_ok=True)

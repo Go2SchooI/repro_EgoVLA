@@ -45,8 +45,6 @@ def eval_single_sample(
   ).to(model.device)
 
   data_dict["inference"] = True
-  data_dict["raw_action_labels"] = raw_data_dict["raw_action_label"].to(model.dtype).to(model.device) # No Need to Unsqueeze
-  data_dict["raw_action_masks"] = raw_data_dict["raw_action_mask"].to(model.device) # No Need to Unsqueeze
 
   data_dict["raw_proprio_inputs"] = raw_data_dict["proprio_input"].to(model.dtype).to(model.device)
   data_dict["raw_proprio_inputs_2d"] = raw_data_dict["proprio_input_2d"].to(model.dtype).to(model.device)
@@ -54,7 +52,6 @@ def eval_single_sample(
   data_dict["raw_proprio_inputs_rot"] = raw_data_dict["proprio_input_rot"].to(model.dtype).to(model.device)
   data_dict["raw_proprio_inputs_handdof"] = raw_data_dict["proprio_input_handdof"].to(model.dtype).to(model.device)
   data_dict["raw_proprio_inputs_hand_finger_tip"] = raw_data_dict["proprio_input_hand_finger_tip"].to(model.dtype).to(model.device)
-  data_dict["raw_ee_movement_masks"] = raw_data_dict["ee_movement_mask"].to(model.dtype).to(model.device)
 
   with torch.inference_mode():
       # with torch.eval():
@@ -63,5 +60,5 @@ def eval_single_sample(
   return output.prediction.cpu().numpy(), \
     raw_data_dict["raw_image_obs"], \
     raw_data_dict["raw_action_label"].cpu().numpy(), \
-    data_dict["raw_action_masks"].cpu().numpy(), \
+    raw_data_dict["raw_action_mask"].cpu().numpy(), \
     output.loss.item()

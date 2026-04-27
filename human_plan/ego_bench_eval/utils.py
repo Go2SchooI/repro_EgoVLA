@@ -1,3 +1,4 @@
+import os
 import torch
 from omni.isaac.lab.utils.math import subtract_frame_transforms
 from human_plan.utils.mano.forward import (
@@ -629,22 +630,24 @@ from human_plan.dataset_preprocessing.utils.mano_utils import (
   mano_to_inspire_mapping
 )
 
+EVAL_DEVICE = torch.device(os.environ.get("EGO_VLA_EVAL_DEVICE", "cuda"))
+
 hand_actuation_net = HandActuationNet(
     input_dim=30, output_dim=12 * 2
 ) 
 hand_actuation_net.load_state_dict(
-    torch.load("hand_actuation_net.pth")
+    torch.load("hand_actuation_net.pth", map_location=EVAL_DEVICE)
 )
-hand_actuation_net.to("cuda")
+hand_actuation_net.to(EVAL_DEVICE)
 
 
 hand_mano_retarget_net = HandActuationNet(
     input_dim=12 * 2, output_dim=15 * 2
 ) 
 hand_mano_retarget_net.load_state_dict(
-    torch.load("hand_mano_retarget_net.pth")
+    torch.load("hand_mano_retarget_net.pth", map_location=EVAL_DEVICE)
 )
-hand_mano_retarget_net.to("cuda")
+hand_mano_retarget_net.to(EVAL_DEVICE)
 
 from llava.model.language_model.rotation_convert import rot6d_to_rotmat, batch_axis2matrix, batch_matrix2axis
 
@@ -679,12 +682,12 @@ def ik_eval_single_step(
 
   left_denormed_dof = denorm_hand_dof(
     torch.tensor(pred_hand[:, 0, :])#.to("cuda").float()
-  ).to("cuda").float()
+  ).to(EVAL_DEVICE).float()
   left_denormed_dof[..., 6:] = 0
 
   right_denormed_dof = denorm_hand_dof(
     torch.tensor(pred_hand[:, 1, :])#.to("cuda").float()
-  ).to("cuda").float()
+  ).to(EVAL_DEVICE).float()
   right_denormed_dof[..., 6:] = 0
 
   left_hand3d_kps_forretarget = mano_forward_retarget(

@@ -1,3 +1,4 @@
+import logging as std_logging
 import typing
 
 if typing.TYPE_CHECKING:
@@ -9,9 +10,14 @@ __all__ = ["logger"]
 
 
 def __get_logger() -> Logger:
-    from loguru import logger
-
-    return logger
+    try:
+        from loguru import logger
+        return logger
+    except ImportError:
+        logger = std_logging.getLogger("llava")
+        if not logger.handlers:
+            std_logging.basicConfig(level=std_logging.INFO)
+        return logger
 
 
 logger = __get_logger()

@@ -17,9 +17,12 @@ from transformers.utils import logging
 
 from llava.model.multimodal_encoder.intern.configuration_intern_vit import InternVisionConfig
 
-from .flash_attention import FlashAttention
-
-has_flash_attn = True
+try:
+    from .flash_attention import FlashAttention
+    has_flash_attn = True
+except ImportError:
+    FlashAttention = None
+    has_flash_attn = False
 
 
 logger = logging.get_logger(__name__)

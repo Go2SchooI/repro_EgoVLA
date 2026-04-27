@@ -14,12 +14,31 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 from transformers import PretrainedConfig, SiglipImageProcessor
+from transformers.utils import is_flash_attn_2_available
 
 from llava.model.multimodal_encoder.vision_encoder import VisionTower, VisionTowerS2
 
 from .siglip import SiglipVisionModel
+
+
+def _get_siglip_attn_implementation() -> str:
+    requested_impl = os.environ.get("EGO_VLA_SIGLIP_ATTN_IMPLEMENTATION", "flash_attention_2")
+    if requested_impl != "flash_attention_2":
+        return requested_impl
+
+    if is_flash_attn_2_available():
+        return requested_impl
+
+    fallback_impl = os.environ.get("EGO_VLA_SIGLIP_ATTN_FALLBACK", "sdpa")
+    print(
+        f"FlashAttention2 is unavailable for SigLIP vision tower. Falling back to {fallback_impl}.",
+        flush=True,
+    )
+    return fallback_impl
 
 
 class SiglipVisionTower(VisionTower):
@@ -28,7 +47,7 @@ class SiglipVisionTower(VisionTower):
         # TODO(ligengl): why pass config here leading to errors?
         self.vision_tower = SiglipVisionModel.from_pretrained(
             model_name_or_path,
-            attn_implementation="flash_attention_2",
+            attn_implementation=_get_siglip_attn_implementation(),
             torch_dtype=eval(config.model_dtype),
         )
         self.image_processor = SiglipImageProcessor.from_pretrained(model_name_or_path)
@@ -40,7 +59,7 @@ class SiglipVisionTowerS2(VisionTowerS2):
         super().__init__(model_name_or_path, config)
         self.vision_tower = SiglipVisionModel.from_pretrained(
             model_name_or_path,
-            attn_implementation="flash_attention_2",
+            attn_implementation=_get_siglip_attn_implementation(),
             torch_dtype=eval(config.model_dtype),
         )
         self.image_processor = SiglipImageProcessor.from_pretrained(model_name_or_path)

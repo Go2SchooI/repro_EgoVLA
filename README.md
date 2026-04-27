@@ -214,13 +214,20 @@ python human_plan/utils/nn_retarget_tomano.py
 
 Before training eval on our Ego Humanoid Manipulation Benchmark. Please follow the instruction on [Ego Humanoid Manipulation Benchmark](https://github.com/quincy-u/Ego_Humanoid_Manipulation_Benchmark)
 
+### Smoke Test the Simulation Environment
+
+```bash
+python human_plan/ego_bench_eval/smoke_test_env.py --task Humanoid-Push-Box-v0 --headless
+```
+
 ### Evaluation Single Task on Single Visual Config:
 
 ```bash
 mkdir video_output
 # Evaluation Result will be stored in result_log.txt
 # Evaluation Videos will be stored in video_output
-# This command is evaluate the given model 
+# The script uses /root/gpufree-data/EgoVLA_Release/checkpoints/otv-fixed-set-subset-6gpu-wandb-v5-from14000/checkpoint-3500 by default.
+# Override it by setting EGO_VLA_CHECKPOINT_PATH if needed.
 bash human_plan/ego_bench_eval/fullpretrain_p30_h5_transv2.sh Humanoid-Push-Box-v0 1 2 0.2 3 1 result_log.txt 0 0 0.8 video_output evaluation_tag
 ```
 
@@ -228,7 +235,7 @@ bash human_plan/ego_bench_eval/fullpretrain_p30_h5_transv2.sh Humanoid-Push-Box-
 
 
 ```bash
-python human_plan/ego_bench_eval/batch_script_30hz.py
+python human_plan/ego_bench_eval/batch_script_30hz_h5_full.py
 ```
 
 ### Note:

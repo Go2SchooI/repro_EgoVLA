@@ -1,0 +1,54 @@
+Task: Push-Box, Room Idx: 1, Table Idx: 2, Episode Label: episode_50.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_success: 0.0 
+Task: Push-Box, Room Idx: 1, Table Idx: 2, Episode Label: episode_51.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_success: 0.0 
+Task: Push-Box, Room Idx: 1, Table Idx: 2, Episode Label: episode_52.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_success: 0.0 
+Task: Close-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_17.hdf5, Trial Label: 0, Result: True 
+success: 1.0 reach_success: 1.0 move_door_success: 1.0 
+Task: Close-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_35.hdf5, Trial Label: 0, Result: True 
+success: 1.0 reach_success: 1.0 move_door_success: 1.0 
+Task: Close-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_39.hdf5, Trial Label: 0, Result: True 
+success: 1.0 reach_success: 0.0 move_door_success: 1.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_8.hdf5, Trial Label: 0, Result: False 
+success: 0.0 move_lid_success: 0.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_35.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 1.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_25.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 0.0 
+Task: Pour-Balls, Room Idx: 1, Table Idx: 2, Episode Label: episode_55.hdf5, Trial Label: 0, Result: True 
+success: 1 reach_bottle_success: 1 lift_success: 1 
+Task: Pour-Balls, Room Idx: 1, Table Idx: 2, Episode Label: episode_52.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_bottle_success: 1 lift_success: 0 
+Task: Pour-Balls, Room Idx: 1, Table Idx: 2, Episode Label: episode_63.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_bottle_success: 1 lift_success: 1 
+Task: Insert-And-Unload-Cans, Room Idx: 1, Table Idx: 2, Episode Label: episode_98.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_success: 1.0 lift_success: 0.0 insert_success: 0.0 unload_success: 0.0 
+Task: Insert-And-Unload-Cans, Room Idx: 1, Table Idx: 2, Episode Label: episode_62.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_success: 1.0 lift_success: 0.0 insert_success: 0.0 unload_success: 0.0 
+Task: Insert-And-Unload-Cans, Room Idx: 1, Table Idx: 2, Episode Label: episode_64.hdf5, Trial Label: 0, Result: False 
+success: 0 reach_success: 1.0 lift_success: 0.0 insert_success: 0.0 unload_success: 0.0 
+Task: Open-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_35.hdf5, Trial Label: 0, Result: False 
+success: 0.0 reach_success: 0.0 move_door_success: 0.0 
+Task: Open-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_0.hdf5, Trial Label: 0, Result: False 
+success: 0.0 reach_success: 0.0 move_door_success: 0.0 
+Task: Open-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_42.hdf5, Trial Label: 0, Result: False 
+success: 0.0 reach_success: 0.0 move_door_success: 0.0 
+Task: Open-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_35.hdf5, Trial Label: 0, Result: False 
+success: 0.0 reach_success: 0.0 move_door_success: 0.0 
+Task: Open-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_0.hdf5, Trial Label: 0, Result: False 
+success: 0.0 reach_success: 0.0 move_door_success: 0.0 
+Task: Open-Drawer, Room Idx: 1, Table Idx: 2, Episode Label: episode_42.hdf5, Trial Label: 0, Result: False 
+success: 0.0 reach_success: 0.0 move_door_success: 0.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_8.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 1.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_35.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 0.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_25.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 0.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_8.hdf5, Trial Label: 0, Result: False 
+success: 0.0 move_lid_success: 0.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_35.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 1.0 
+Task: Open-Laptop, Room Idx: 1, Table Idx: 2, Episode Label: episode_25.hdf5, Trial Label: 0, Result: True 
+success: 1.0 move_lid_success: 0.0 

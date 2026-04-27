@@ -1,18 +1,54 @@
-TASK=$1
-ROOM_IDX=$2
-TABLE_IDX=$3
-SMOOTH_WEIGHT=$4
-NUM_EPISODES=$5
-NUM_TRIALS=$6
-SAVING_PATH=$7
-SAVE_FRAMES=$8
-PROJ_TRAJS=$9
-HAND_SMOOTH_WEIGHT=${10}
-video_saving_path=${11}
-additional_label=${12}
-use_per_step_instruction=${13}
+#!/usr/bin/env bash
+set -euo pipefail
 
-source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
+TASK=${1:?Missing task name}
+ROOM_IDX=${2:?Missing room index}
+TABLE_IDX=${3:?Missing table index}
+SMOOTH_WEIGHT=${4:?Missing ee smoothing weight}
+NUM_EPISODES=${5:?Missing episode count}
+NUM_TRIALS=${6:?Missing trial count}
+SAVING_PATH=${7:?Missing result saving path}
+SAVE_FRAMES=${8:?Missing save_frames flag}
+PROJ_TRAJS=${9:?Missing project_trajs flag}
+HAND_SMOOTH_WEIGHT=${10:?Missing hand smoothing weight}
+video_saving_path=${11:?Missing video output path}
+additional_label=${12:?Missing evaluation tag}
+use_per_step_instruction=${13:-0}
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+DEFAULT_CHECKPOINT="/root/gpufree-data/EgoVLA_Release/checkpoints/otv-fixed-set-subset-6gpu-wandb-v5-from14000/checkpoint-3500"
+CHECKPOINT_PATH="${EGO_VLA_CHECKPOINT_PATH:-$DEFAULT_CHECKPOINT}"
+PYTHON_BIN="${EGO_VLA_EVAL_PYTHON:-python}"
+EVAL_DEVICE="${EGO_VLA_EVAL_DEVICE:-cuda:0}"
+
+if [ -n "${EGO_VLA_SETUP_SCRIPT:-}" ]; then
+  if [ ! -f "$EGO_VLA_SETUP_SCRIPT" ]; then
+    echo "Setup script not found: $EGO_VLA_SETUP_SCRIPT" >&2
+    exit 1
+  fi
+  # shellcheck disable=SC1090
+  source "$EGO_VLA_SETUP_SCRIPT"
+fi
+
+cd "$REPO_ROOT"
+export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/VILA${PYTHONPATH:+:$PYTHONPATH}"
+
+LIBFIX_DIR="${EGO_VLA_LIBFIX_DIR:-/root/gpufree-data/libfix}"
+if [ -d "$LIBFIX_DIR" ]; then
+  export LD_LIBRARY_PATH="$LIBFIX_DIR:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+if [ ! -d "$CHECKPOINT_PATH" ]; then
+  echo "Checkpoint directory not found: $CHECKPOINT_PATH" >&2
+  exit 1
+fi
+
+LEGACY_MODEL_BASE="$REPO_ROOT/checkpoints/ego_vla_checkpoint"
+if [ ! -d "$LEGACY_MODEL_BASE" ]; then
+  echo "Warning: legacy model base not found at $LEGACY_MODEL_BASE" >&2
+  echo "If model loading fails, check human_plan/vila_eval/utils/load_model.py." >&2
+fi
 
 LOG_ROOT=logs
 
@@ -20,15 +56,14 @@ RUN_NAME=temp
 OUTPUT_DIR=$LOG_ROOT/$RUN_NAME
 
 bs=16
-n_node=1
-
-exp_id=ego_vla_checkpoint
-checkpoint_xxx=$(find checkpoints/$exp_id -type d -name "ckpt-*" -print -quit)
-echo $checkpoint_xxx
+echo "Using checkpoint: $CHECKPOINT_PATH"
 
 # deepspeed human_plan/train/train_vla_finetune_llava.py \
-python human_plan/ego_bench_eval/ik_agent_30hz.py \
-    --model_name_or_path $checkpoint_xxx \
+"$PYTHON_BIN" human_plan/ego_bench_eval/ik_agent_30hz.py \
+    --model_name_or_path "$CHECKPOINT_PATH" \
+    --device "$EVAL_DEVICE" \
+    --headless \
+    --enable_cameras \
     --version qwen2 \
     --vision_tower google/siglip-so400m-patch14-384 \
     --data_mixture otv_sim_fixed_set_aug_AUG_SHIFT_30Hz_train \
@@ -106,15 +141,15 @@ python human_plan/ego_bench_eval/ik_agent_30hz.py \
     --sep_proprio True \
     --sep_query_token True \
     --loss_use_l1 True \
-    --task $TASK \
-    --room_idx $ROOM_IDX \
-    --table_idx $TABLE_IDX \
-    --smooth_weight $SMOOTH_WEIGHT \
-    --num_episodes $NUM_EPISODES \
-    --num_trials $NUM_TRIALS \
-    --result_saving_path $SAVING_PATH \
-    --save_frames $SAVE_FRAMES \
-    --project_trajs $PROJ_TRAJS \
-    --hand_smooth_weight $HAND_SMOOTH_WEIGHT \
-    --video_saving_path $video_saving_path \
-    --additional_label $additional_label 
+    --task "$TASK" \
+    --room_idx "$ROOM_IDX" \
+    --table_idx "$TABLE_IDX" \
+    --smooth_weight "$SMOOTH_WEIGHT" \
+    --num_episodes "$NUM_EPISODES" \
+    --num_trials "$NUM_TRIALS" \
+    --result_saving_path "$SAVING_PATH" \
+    --save_frames "$SAVE_FRAMES" \
+    --project_trajs "$PROJ_TRAJS" \
+    --hand_smooth_weight "$HAND_SMOOTH_WEIGHT" \
+    --video_saving_path "$video_saving_path" \
+    --additional_label "$additional_label"

@@ -1,6 +1,179 @@
 
 import os
+import shutil
+import subprocess
+import sys
 import tqdm
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VILA_ROOT = REPO_ROOT / "VILA"
+for path in (str(REPO_ROOT), str(VILA_ROOT)):
+  if path not in sys.path:
+    sys.path.insert(0, path)
+
+
+def _maybe_reexec_with_libfix():
+  if os.environ.get("EGO_VLA_LIBFIX_DONE") == "1":
+    return
+
+  preferred_dirs = [
+    "/root/gpufree-data/libfix",
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/local/cuda/lib64",
+  ]
+  current_paths = [path for path in os.environ.get("LD_LIBRARY_PATH", "").split(":") if path]
+  prepended_paths = [path for path in preferred_dirs if os.path.isdir(path) and path not in current_paths]
+
+  if not prepended_paths:
+    return
+
+  env = os.environ.copy()
+  env["LD_LIBRARY_PATH"] = ":".join(prepended_paths + current_paths)
+  env["EGO_VLA_LIBFIX_DONE"] = "1"
+  os.execvpe(sys.executable, [sys.executable, *sys.argv], env)
+
+
+_maybe_reexec_with_libfix()
+
+
+def _prefer_env_boto_stack():
+  if os.environ.get("EGO_VLA_PRELOAD_BOTO", "1") != "1":
+    return
+
+  try:
+    import boto3 as _boto3
+    import botocore as _botocore
+    import s3transfer as _s3transfer
+  except Exception as exc:
+    print(f"[WARN] Failed to preload boto stack: {exc}", file=sys.stderr)
+    return
+
+  print(
+    "[INFO] Preloaded boto stack from env: "
+    f"boto3={_boto3.__version__}, "
+    f"botocore={_botocore.__version__}, "
+    f"s3transfer={_s3transfer.__version__}",
+    file=sys.stderr,
+  )
+
+
+_prefer_env_boto_stack()
+
+
+def _configure_headless_vulkan():
+  if os.environ.get("EGO_VLA_HEADLESS_EGL_ICD", "1") != "1":
+    return
+
+  xdg_runtime_dir = os.environ.setdefault("XDG_RUNTIME_DIR", "/tmp/egovla-xdg-runtime")
+  os.makedirs(xdg_runtime_dir, mode=0o700, exist_ok=True)
+
+  icd_path = "/tmp/egovla_nvidia_egl_icd.json"
+  icd_contents = """{
+  "file_format_version": "1.0.1",
+  "ICD": {
+    "library_path": "libEGL_nvidia.so.0",
+    "api_version": "1.4.312"
+  }
+}
+"""
+  if not os.path.exists(icd_path) or open(icd_path, "r").read() != icd_contents:
+    with open(icd_path, "w") as icd_file:
+      icd_file.write(icd_contents)
+
+  os.environ.setdefault("VK_ICD_FILENAMES", icd_path)
+  os.environ.setdefault("DISABLE_LAYER_NV_OPTIMUS_1", "1")
+  print(f"[INFO] Using headless Vulkan ICD override: {os.environ['VK_ICD_FILENAMES']}", file=sys.stderr)
+
+
+_configure_headless_vulkan()
+
+
+def _canonicalize_cuda_device(device: str) -> str:
+  if not isinstance(device, str) or not device.startswith("cuda"):
+    return device
+
+  try:
+    import torch
+  except Exception:
+    return device
+
+  try:
+    visible_device_count = torch.cuda.device_count()
+  except Exception:
+    return device
+
+  if visible_device_count <= 0:
+    return device
+
+  requested_index = 0
+  if ":" in device:
+    try:
+      requested_index = int(device.split(":", 1)[1])
+    except ValueError:
+      return device
+
+  if requested_index < visible_device_count:
+    return f"cuda:{requested_index}"
+
+  canonical_device = "cuda:0"
+  print(
+    f"[WARN] Requested device {device}, but only {visible_device_count} CUDA device(s) "
+    f"are visible in this process. Falling back to {canonical_device}. "
+    f"If you want physical GPU {requested_index}, run with "
+    f"CUDA_VISIBLE_DEVICES={requested_index} and EGO_VLA_EVAL_DEVICE=cuda:0.",
+    file=sys.stderr,
+  )
+  return canonical_device
+
+
+def _convert_video_to_h264(video_path: str) -> None:
+  ffmpeg_bin = shutil.which("ffmpeg")
+  if ffmpeg_bin is None:
+    print(f"[WARN] ffmpeg not found, keeping original video: {video_path}", flush=True)
+    return
+
+  source_path = Path(video_path)
+  if not source_path.exists():
+    print(f"[WARN] Video file missing, skipping H.264 transcode: {video_path}", flush=True)
+    return
+
+  temp_output_path = source_path.with_name(f"{source_path.stem}.h264_tmp{source_path.suffix}")
+  print(f"h264_transcode_start path={source_path}", flush=True)
+  try:
+    subprocess.run(
+      [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        str(source_path),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(temp_output_path),
+      ],
+      check=True,
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.PIPE,
+      text=True,
+    )
+  except subprocess.CalledProcessError as exc:
+    if temp_output_path.exists():
+      temp_output_path.unlink()
+    error_tail = exc.stderr.strip().splitlines()[-1] if exc.stderr else str(exc)
+    print(
+      f"[WARN] Failed to transcode video to H.264, keeping original file: {error_tail}",
+      flush=True,
+    )
+    return
+
+  temp_output_path.replace(source_path)
+  print(f"h264_transcode_done path={source_path}", flush=True)
 
 from transformers import HfArgumentParser
 from human_plan.vila_train.args import (
@@ -45,8 +218,14 @@ parser.add_argument("--additional_label", type=str, default=None, help="addition
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 
+app_launcher_args, _ = parser.parse_known_args()
+app_launcher_args.enable_cameras = True
+app_launcher_args.headless = True
+app_launcher_args.device = _canonicalize_cuda_device(getattr(app_launcher_args, "device", "cuda:0"))
+os.environ["EGO_VLA_EVAL_DEVICE"] = app_launcher_args.device
+
 # launch omniverse app
-app_launcher = AppLauncher(enable_cameras=True, device="cuda", headless=True)
+app_launcher = AppLauncher(app_launcher_args)
 simulation_app = app_launcher.app
 
 from human_plan.ego_bench_eval.utils import (
@@ -74,11 +253,14 @@ from human_plan.vila_eval.utils.load_model import load_model_eval
 def main():
 
     model_args, data_args, training_args, task_args = parser.parse_args_into_dataclasses()
+    task_args.device = _canonicalize_cuda_device(task_args.device)
+    os.environ["EGO_VLA_EVAL_DEVICE"] = task_args.device
+    eval_device = torch.device(task_args.device)
 
     model, tokenizer, model_args, data_args, training_args = load_model_eval(
       model_args, data_args, training_args
     )
-    model.to("cuda")
+    model.to(eval_device)
 
     data_args.sep_query_token = model_args.sep_query_token
 
@@ -104,24 +286,46 @@ def main():
     # parse configuration
     env_cfg: BaseEnvCfg = parse_env_cfg(
         task_args.task,
+        device=task_args.device,
         num_envs=1,
     )
 
+    fast_scene_mode = os.environ.get("EGO_VLA_EVAL_FAST_SCENE", "0") == "1"
+    warmup_steps = int(os.environ.get("EGO_VLA_EVAL_WARMUP_STEPS", "100"))
+
     env_cfg.episode_length_s = 60 # 60 seconds episode length -> For long horizon tasks
-    env_cfg.randomize = True
+    env_cfg.randomize = not fast_scene_mode
     # create environment
-    env_cfg.spawn_background =True
+    env_cfg.spawn_background = not fast_scene_mode
     # select background
     room_idx = task_args.room_idx
     table_idx = task_args.table_idx
     env_cfg.room_idx = room_idx
     env_cfg.table_idx = table_idx
+    print(
+      "eval_scene_config",
+      {
+        "task": task_args.task,
+        "room_idx": room_idx,
+        "table_idx": table_idx,
+        "randomize": env_cfg.randomize,
+        "spawn_background": env_cfg.spawn_background,
+        "device": task_args.device,
+        "fast_scene_mode": fast_scene_mode,
+        "warmup_steps": warmup_steps,
+      },
+      flush=True,
+    )
+    print("creating_env", flush=True)
     env: BaseEnv = gym.make(
         task_args.task,
         cfg=env_cfg
     )
+    print("env_created", flush=True)
     env.cfg.randomize_idx = randomize_idxes[curr_random_idx]
+    print("initial_env_reset_start", flush=True)
     env.reset()
+    print("initial_env_reset_done", flush=True)
 
     # IK controllers
     command_type = "pose"
@@ -143,8 +347,11 @@ def main():
       f"inference_{task_args.smooth_weight}_{task_args.hand_smooth_weight}"
     )
 
-    from pathlib import Path
     Path(save_path).mkdir(exist_ok=True, parents=True)
+    if task_args.result_saving_path is not None:
+      result_saving_path = Path(task_args.result_saving_path)
+      if str(result_saving_path.parent) not in ("", "."):
+        result_saving_path.parent.mkdir(exist_ok=True, parents=True)
 
     import pickle
     with open("init_poses_fixed_set_100traj.pkl", "rb") as f:
@@ -171,6 +378,10 @@ def main():
     # with torch.inference_mode():
     for episode_idx in episode_list:
       for trial_idx in range(task_args.num_trials):
+        print(
+          f"episode_trial_start episode={episode_idx[0]} trial={trial_idx} randomize_idx={randomize_idxes[curr_random_idx]}",
+          flush=True,
+        )
         # seq_name = f"episode_{episode_idx}.hdf5"
         seq_name = episode_idx[0]
 
@@ -188,7 +399,6 @@ def main():
           f"room_{room_idx}",
           f"table_{table_idx}",
         )
-        from pathlib import Path
         Path(seq_save_path).mkdir(exist_ok=True, parents=True)
         output_path = os.path.join(
           seq_save_path,
@@ -213,7 +423,15 @@ def main():
             # reset
           curr_random_idx += 1
           env.cfg.randomize_idx = randomize_idxes[curr_random_idx]
+          print(
+            f"rollout_env_reset_start episode={episode_idx[0]} trial={trial_idx} randomize_idx={env.cfg.randomize_idx}",
+            flush=True,
+          )
           env_results = env.reset()
+          print(
+            f"rollout_env_reset_done episode={episode_idx[0]} trial={trial_idx}",
+            flush=True,
+          )
           left_ik_controller.reset()
           right_ik_controller.reset()
           padding_idx = padding
@@ -222,7 +440,12 @@ def main():
           left_dof = init_poses[load_name][seq_name][padding]["left_dof"]
           right_dof = init_poses[load_name][seq_name][padding]["right_dof"]
 
-          for idx in range(100):
+          for idx in range(warmup_steps):
+            if idx % max(1, min(10, warmup_steps)) == 0:
+              print(
+                f"warmup_progress episode={episode_idx[0]} trial={trial_idx} step={idx}/{warmup_steps}",
+                flush=True,
+              )
             left_dof = init_poses[load_name][seq_name][padding]["left_dof"]
             right_dof = init_poses[load_name][seq_name][padding]["right_dof"]
             
@@ -250,12 +473,20 @@ def main():
             env_results = env.step(action)
             rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
             rgb_obs = cv2.resize(rgb_obs, (384, 384))
+          print(
+            f"warmup_done episode={episode_idx[0]} trial={trial_idx}",
+            flush=True,
+          )
         rgb_obs_hist.append(rgb_obs)
         count = padding
 
         result = False
         from human_plan.ego_bench_eval.utils import TASK_MAX_HORIZON
         max_horizon = TASK_MAX_HORIZON[task_args.task]
+        print(
+          f"rollout_start episode={episode_idx[0]} trial={trial_idx} max_horizon={max_horizon}",
+          flush=True,
+        )
 
         for i in tqdm.tqdm(range(max_horizon)):
           # run everything in inference mode
@@ -283,7 +514,7 @@ def main():
 
           raw_data_dict = process_input(
               rgb_obs_hist, 
-              proprio_input.to("cuda"),
+              proprio_input.to(eval_device),
               raw_language_instruction,
               data_args, model_args, tokenizer
           )
@@ -387,16 +618,18 @@ def main():
             )
           count += 1
 
-        with open(task_args.result_saving_path, "a") as f:
-          f.write(f"Task: {task_name}, Room Idx: {room_idx}, Table Idx: {table_idx}, Episode Label: {episode_idx[0]}, Trial Label: {trial_idx}, Result: {result} \n")
-          subtask_string = ""
-          for key in env_results[0].keys():
-            if "success" in key:
-              subtask_string += f"{key}: {env_results[0][key].sum().item()} "
-          subtask_string += "\n"
-          f.write(subtask_string)
-          
+        if task_args.result_saving_path is not None:
+          with open(task_args.result_saving_path, "a") as f:
+            f.write(f"Task: {task_name}, Room Idx: {room_idx}, Table Idx: {table_idx}, Episode Label: {episode_idx[0]}, Trial Label: {trial_idx}, Result: {result} \n")
+            subtask_string = ""
+            for key in env_results[0].keys():
+              if "success" in key:
+                subtask_string += f"{key}: {env_results[0][key].sum().item()} "
+            subtask_string += "\n"
+            f.write(subtask_string)
+        
         out.release()
+        _convert_video_to_h264(output_path)
         # close the simulator
     env.close()
 

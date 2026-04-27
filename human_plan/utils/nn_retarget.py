@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, random_split
-from datasets import load_dataset, load_from_disk
 
 from human_plan.utils.mano.forward import (
     mano_forward_retarget,
@@ -124,6 +123,8 @@ def infer(model, left_mano, right_mano):
 
 # Main Script
 if __name__ == "__main__":
+    from datasets import load_from_disk
+
     # Load the Hugging Face dataset
     hf_dataset = load_from_disk(
         "/home/xiaolwang/new_home/datasets/Manipulation-Summer/otv_isaaclab_hf_v3/HF_hand_V1_train"

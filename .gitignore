@@ -169,3 +169,12 @@ pre_processing
 checkpoints
 
 .vscode
+
+data/
+video_output
+.wandb_api
+*.zip
+.DS_Store
+._*
+
+mano_v1_2/
