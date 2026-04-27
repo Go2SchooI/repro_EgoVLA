@@ -413,6 +413,12 @@ def main():
         make_fast_fields,
         make_raw_fields,
       )
+      from human_plan.ego_bench_eval.rl.diagnostics import (
+        action_diff_rows,
+        identity_error_summary,
+        summarize_action_diff_rows,
+        write_action_diff_logs,
+      )
       from human_plan.ego_bench_eval.rl.privileged_state import PrivilegedStateAdapter
       from human_plan.ego_bench_eval.rl.replay_buffer import RLReplayBuffer
       from human_plan.ego_bench_eval.rl.sac import SACRefBC, save_split_checkpoints
@@ -435,7 +441,13 @@ def main():
         except TypeError:
           action_norm_state = torch.load(rl_config.action_normalizer_path, map_location="cpu")
         rl_action_normalizer = ActionNormalizer.from_state(action_norm_state)
-      elif rl_config.replay_path and os.path.exists(rl_config.replay_path) and rl_config.mode in ("online_rl", "eval_rl"):
+      elif rl_config.replay_path and os.path.exists(rl_config.replay_path) and rl_config.mode in (
+        "online_rl",
+        "eval_rl",
+        "eval_identity_actor",
+        "eval_tiny_noise",
+        "eval_residual_scale_sweep",
+      ):
         replay_for_stats = RLReplayBuffer.load(rl_config.replay_path)
         rl_action_normalizer = ActionNormalizer.from_state(
           replay_for_stats.metadata.get("action_normalizer")
@@ -446,13 +458,13 @@ def main():
         rl_critic_obs_normalizer = VectorNormalizer.from_state(
           replay_for_stats.metadata.get("critic_obs_normalizer")
         )
-      if rl_config.mode == "eval_rl":
+      if rl_config.mode in ("eval_rl", "eval_residual_scale_sweep"):
         if not rl_config.load_rl_checkpoint_path:
-          raise ValueError("rl.mode=eval_rl requires --rl_load_rl_checkpoint_path")
+          raise ValueError(f"rl.mode={rl_config.mode} requires --rl_load_rl_checkpoint_path")
         if rl_agent is None:
           raise FileNotFoundError(f"RL checkpoint not found: {rl_config.load_rl_checkpoint_path}")
         if rl_actor_obs_normalizer is None:
-          raise ValueError("rl.mode=eval_rl checkpoint is missing actor_obs_normalizer")
+          raise ValueError(f"rl.mode={rl_config.mode} checkpoint is missing actor_obs_normalizer")
 
       if rl_config.mode in ("collect_base", "online_rl"):
         if rl_config.replay_path and os.path.exists(rl_config.replay_path) and os.path.getsize(rl_config.replay_path) > 0:
@@ -463,6 +475,9 @@ def main():
             print(f"[WARN] Ignoring empty replay file: {rl_config.replay_path}", flush=True)
           rl_replay = RLReplayBuffer(rl_config.replay_capacity)
       rl_priv_adapter = PrivilegedStateAdapter(env)
+      rl_noise_rng = np.random.default_rng(rl_config.noise_seed)
+      rl_action_diff_rows = []
+      rl_identity_summaries = []
 
     def _rl_append_transition(prev_ctx, next_ctx, reward, done, success, timeout):
       raw_fields = make_raw_fields(
@@ -761,10 +776,13 @@ def main():
               )
               rl_pending_transition = None
 
-            if rl_config.mode in ("eval_rl", "online_rl"):
+            a_ref_norm = rl_action_normalizer.normalize(a_ref)
+            a_actor_for_log = None
+            a_actor_norm = None
+            if rl_config.mode in ("eval_rl", "online_rl", "eval_residual_scale_sweep"):
               if rl_agent is None:
-                if rl_config.mode == "eval_rl":
-                  raise RuntimeError("eval_rl must use a loaded RL checkpoint")
+                if rl_config.mode in ("eval_rl", "eval_residual_scale_sweep"):
+                  raise RuntimeError(f"{rl_config.mode} must use a loaded RL checkpoint")
                 rl_agent = SACRefBC(
                   actor_obs_dim=actor_obs.shape[0],
                   critic_obs_dim=priv_state.shape[0],
@@ -777,8 +795,49 @@ def main():
                   f"rl_initialized_random actor_obs_dim={actor_obs.shape[0]} critic_obs_dim={priv_state.shape[0]} actor_action_dim={a_ref.shape[0]}",
                   flush=True,
                 )
-              deterministic = rl_config.mode == "eval_rl" and rl_config.deterministic_eval
-              a_exec_norm = rl_agent.act(actor_obs, deterministic=deterministic)
+              deterministic = rl_config.mode in ("eval_rl", "eval_residual_scale_sweep") and rl_config.deterministic_eval
+              a_actor_norm = rl_agent.act(actor_obs, deterministic=deterministic)
+              a_actor_norm = np.clip(
+                a_actor_norm,
+                -float(rl_config.action_norm_clip),
+                float(rl_config.action_norm_clip),
+              )
+              a_actor_for_log = postprocess_action(
+                denormalize_action(a_actor_norm, rl_action_normalizer),
+                a_ref,
+                env=env,
+              )
+              if rl_config.mode == "eval_residual_scale_sweep":
+                a_exec_norm = a_ref_norm + float(rl_config.residual_scale) * (a_actor_norm - a_ref_norm)
+                a_exec_norm = np.clip(
+                  a_exec_norm,
+                  -float(rl_config.action_norm_clip),
+                  float(rl_config.action_norm_clip),
+                )
+              else:
+                a_exec_norm = a_actor_norm
+              a_exec = denormalize_action(a_exec_norm, rl_action_normalizer)
+              a_exec = postprocess_action(a_exec, a_ref, env=env)
+            elif rl_config.mode == "eval_identity_actor":
+              a_exec_norm = a_ref_norm.copy()
+              a_exec = denormalize_action(a_exec_norm, rl_action_normalizer)
+              a_exec = postprocess_action(a_exec, a_ref, env=env)
+              identity_summary = identity_error_summary(a_ref, a_exec)
+              rl_identity_summaries.append(identity_summary)
+              if i == 0:
+                print(
+                  "identity_actor_step "
+                  f"identity_max_abs_error={identity_summary['identity_max_abs_error']:.8g} "
+                  f"identity_mean_abs_error={identity_summary['identity_mean_abs_error']:.8g} "
+                  f"per_group_identity_error={identity_summary['per_group_identity_error']}",
+                  flush=True,
+                )
+            elif rl_config.mode == "eval_tiny_noise":
+              if rl_config.noise_type == "uniform":
+                epsilon = rl_noise_rng.uniform(-1.0, 1.0, size=a_ref_norm.shape).astype(np.float32)
+              else:
+                epsilon = rl_noise_rng.standard_normal(size=a_ref_norm.shape).astype(np.float32)
+              a_exec_norm = a_ref_norm + float(rl_config.noise_scale) * epsilon
               a_exec_norm = np.clip(
                 a_exec_norm,
                 -float(rl_config.action_norm_clip),
@@ -794,6 +853,36 @@ def main():
             action_left_hand = a_exec_parts["left_hand"]
             action_right_hand = a_exec_parts["right_hand"]
             rl_curr_ctx["a_exec"] = a_exec
+            rl_curr_ctx["a_ref_norm"] = a_ref_norm
+            rl_curr_ctx["a_exec_norm"] = rl_action_normalizer.normalize(a_exec)
+            if a_actor_norm is not None:
+              rl_curr_ctx["a_actor_norm"] = a_actor_norm
+            if a_actor_for_log is not None:
+              rl_curr_ctx["a_actor"] = a_actor_for_log
+            if rl_config.mode in (
+              "eval_rl",
+              "eval_identity_actor",
+              "eval_tiny_noise",
+              "eval_residual_scale_sweep",
+            ):
+              rl_action_diff_rows.extend(action_diff_rows(
+                step=i,
+                a_ref=a_ref,
+                a_exec=a_exec,
+                a_actor=a_actor_for_log,
+                method=rl_config.mode,
+                episode=episode_idx[0],
+                trial=trial_idx,
+                room_idx=room_idx,
+                table_idx=table_idx,
+                checkpoint=rl_config.load_rl_checkpoint_path,
+                residual_scale=(
+                  float(rl_config.residual_scale)
+                  if rl_config.mode == "eval_residual_scale_sweep"
+                  else (1.0 if rl_config.mode == "eval_rl" else None)
+                ),
+                noise_scale=float(rl_config.noise_scale) if rl_config.mode == "eval_tiny_noise" else None,
+              ))
             if rl_config.debug_dump_shapes or rl_config.mode == "debug_trace_action_path":
               rl_curr_ctx["debug_shapes"] = {
                 "raw_pred.shape": tuple(np.asarray(action_dict["pred"]).shape),
@@ -823,7 +912,15 @@ def main():
                 },
                 "packed_a_ref.shape": tuple(a_ref.shape),
                 "a_exec_matches_a_ref": bool(np.allclose(a_exec, a_ref)),
-                "a_exec_postprocessed": bool(rl_config.mode in ("eval_rl", "online_rl")),
+                "a_exec_postprocessed": bool(rl_config.mode in (
+                  "eval_rl",
+                  "online_rl",
+                  "eval_identity_actor",
+                  "eval_tiny_noise",
+                  "eval_residual_scale_sweep",
+                )),
+                "a_ref_norm.shape": tuple(a_ref_norm.shape),
+                "a_exec_norm.shape": tuple(rl_curr_ctx["a_exec_norm"].shape),
                 "actor_obs.shape": tuple(actor_obs.shape),
                 "priv_state.shape": tuple(priv_state.shape),
                 "base_chunk_summary.shape": tuple(actor_obs_meta["base_chunk_summary_shape"]),
@@ -1006,6 +1103,60 @@ def main():
     if rl_enabled:
       success_rate = float(np.mean(rl_all_successes)) if rl_all_successes else 0.0
       print(f"rl_rollout_done mode={rl_config.mode} success_rate={success_rate:.5g}", flush=True)
+      if rl_action_diff_rows:
+        diff_summary = summarize_action_diff_rows(
+          rl_action_diff_rows,
+          step_start=rl_config.action_diff_step_start,
+          step_end=rl_config.action_diff_step_end,
+        )
+        print(
+          "rl_action_diff_summary "
+          f"mode={rl_config.mode} "
+          f"step_start={rl_config.action_diff_step_start} "
+          f"step_end={rl_config.action_diff_step_end} "
+          f"summary={diff_summary}",
+          flush=True,
+        )
+        if rl_config.action_diff_log_path:
+          write_action_diff_logs(
+            rl_config.action_diff_log_path,
+            rl_action_diff_rows,
+            metadata={
+              "mode": rl_config.mode,
+              "task": task_args.task,
+              "room_idx": room_idx,
+              "table_idx": table_idx,
+              "checkpoint": rl_config.load_rl_checkpoint_path,
+              "noise_scale": rl_config.noise_scale,
+              "noise_type": rl_config.noise_type,
+              "noise_seed": rl_config.noise_seed,
+              "residual_scale": rl_config.residual_scale,
+              "success_rate": success_rate,
+            },
+          )
+          print(f"rl_action_diff_saved path={rl_config.action_diff_log_path}", flush=True)
+      if rl_config.mode == "eval_identity_actor" and rl_identity_summaries:
+        max_error = max(item["identity_max_abs_error"] for item in rl_identity_summaries)
+        mean_error = float(np.mean([item["identity_mean_abs_error"] for item in rl_identity_summaries]))
+        per_group = {}
+        for group_name in rl_identity_summaries[0]["per_group_identity_error"].keys():
+          per_group[group_name] = {
+            "mean_abs": float(np.mean([
+              item["per_group_identity_error"][group_name]["mean_abs"]
+              for item in rl_identity_summaries
+            ])),
+            "max_abs": float(np.max([
+              item["per_group_identity_error"][group_name]["max_abs"]
+              for item in rl_identity_summaries
+            ])),
+          }
+        print(
+          "identity_actor_summary "
+          f"identity_max_abs_error={max_error:.8g} "
+          f"identity_mean_abs_error={mean_error:.8g} "
+          f"per_group_identity_error={per_group}",
+          flush=True,
+        )
       if rl_replay is not None and len(rl_replay) > 0:
         if rl_config.mode == "collect_base":
           rl_action_normalizer = rl_replay.fit_action_normalizer(clip=rl_config.action_norm_clip)

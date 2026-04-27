@@ -9,6 +9,9 @@ RL_MODES = (
   "offline_rl",
   "online_rl",
   "eval_rl",
+  "eval_identity_actor",
+  "eval_tiny_noise",
+  "eval_residual_scale_sweep",
   "debug_trace_action_path",
 )
 
@@ -72,6 +75,13 @@ class RLConfig:
   min_replay_size: int = 256
   max_debug_steps: int = 1
   hidden_dim: int = 256
+  noise_scale: float = 0.0
+  noise_type: str = "gaussian"
+  noise_seed: int = 0
+  residual_scale: float = 1.0
+  action_diff_log_path: Optional[str] = None
+  action_diff_step_start: int = -1
+  action_diff_step_end: int = -1
   wandb_enabled: bool = False
   wandb_project: str = "egovla-rl-posttrain"
   wandb_entity: Optional[str] = None
@@ -96,6 +106,15 @@ class RLConfig:
       raise ValueError("rl.replay_capacity must be positive")
     if self.min_replay_size <= 0:
       self.min_replay_size = self.batch_size
+    if self.noise_scale < 0:
+      raise ValueError("rl.noise_scale must be non-negative")
+    if self.noise_type not in ("gaussian", "uniform"):
+      raise ValueError("rl.noise_type must be gaussian or uniform")
+    if self.residual_scale < 0:
+      raise ValueError("rl.residual_scale must be non-negative")
+    if self.action_diff_step_end >= 0 and self.action_diff_step_start >= 0:
+      if self.action_diff_step_end < self.action_diff_step_start:
+        raise ValueError("rl.action_diff_step_end must be >= rl.action_diff_step_start")
 
 
 def _add_arg(parser, flat_name: str, **kwargs) -> None:
@@ -139,6 +158,13 @@ def add_rl_args(parser) -> None:
   _add_arg(parser, "rl_min_replay_size", type=int, default=256)
   _add_arg(parser, "rl_max_debug_steps", type=int, default=1)
   _add_arg(parser, "rl_hidden_dim", type=int, default=256)
+  _add_arg(parser, "rl_noise_scale", type=float, default=0.0)
+  _add_arg(parser, "rl_noise_type", type=str, default="gaussian")
+  _add_arg(parser, "rl_noise_seed", type=int, default=0)
+  _add_arg(parser, "rl_residual_scale", type=float, default=1.0)
+  _add_arg(parser, "rl_action_diff_log_path", type=str, default=None)
+  _add_arg(parser, "rl_action_diff_step_start", type=int, default=-1)
+  _add_arg(parser, "rl_action_diff_step_end", type=int, default=-1)
   _add_arg(parser, "rl_wandb_enabled", type=str2bool, default=False)
   _add_arg(parser, "rl_wandb_project", type=str, default="egovla-rl-posttrain")
   _add_arg(parser, "rl_wandb_entity", type=str, default=None)
@@ -182,6 +208,13 @@ def build_rl_config(args) -> RLConfig:
     min_replay_size=int(getattr(args, "rl_min_replay_size", 256)),
     max_debug_steps=int(getattr(args, "rl_max_debug_steps", 1)),
     hidden_dim=int(getattr(args, "rl_hidden_dim", 256)),
+    noise_scale=float(getattr(args, "rl_noise_scale", 0.0)),
+    noise_type=getattr(args, "rl_noise_type", "gaussian"),
+    noise_seed=int(getattr(args, "rl_noise_seed", 0)),
+    residual_scale=float(getattr(args, "rl_residual_scale", 1.0)),
+    action_diff_log_path=getattr(args, "rl_action_diff_log_path", None),
+    action_diff_step_start=int(getattr(args, "rl_action_diff_step_start", -1)),
+    action_diff_step_end=int(getattr(args, "rl_action_diff_step_end", -1)),
     wandb_enabled=bool(getattr(args, "rl_wandb_enabled", False)),
     wandb_project=getattr(args, "rl_wandb_project", "egovla-rl-posttrain"),
     wandb_entity=getattr(args, "rl_wandb_entity", None),
