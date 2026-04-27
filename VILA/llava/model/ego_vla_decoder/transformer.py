@@ -124,6 +124,7 @@ class TransformerSplitActV2(nn.Module):
 
   def forward(
     self, latent, input_dict, memory, memory_mask,
+    return_rl_features=False,
   ):
     proprio_input = input_dict["proprio"]
     proprio_input = self.proprio_projection(proprio_input)
@@ -205,6 +206,7 @@ class TransformerSplitActV2(nn.Module):
         latent = latent[:, 6:, :]
       else:
         latent = latent[:, 1:, :]
+    h_preout = latent.detach() if return_rl_features else None
  
     out_left = self.output_projection_left(
       latent[:, ::2]
@@ -222,14 +224,20 @@ class TransformerSplitActV2(nn.Module):
     ], dim=1).reshape(-1, 2 * (3 + 6 + 15))
 
 
-    return {
+    output_dict = {
       "pred": output
     }
+    if return_rl_features:
+      output_dict["rl_features"] = {
+        "h_preout": h_preout,
+      }
+    return output_dict
 
   def inference(
     self, latent, input_dict, memory, memory_mask,
-    x=None, return_kl=False
+    x=None, return_kl=False, return_rl_features=False
   ):
     return self.forward(
-      latent, input_dict, memory, memory_mask
+      latent, input_dict, memory, memory_mask,
+      return_rl_features=return_rl_features,
     )

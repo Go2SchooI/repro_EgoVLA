@@ -48,6 +48,7 @@ class HOILMOutputWithPast(ModelOutput):
   raw_action_masks:  Optional[torch.FloatTensor] = None
   logits: torch.FloatTensor = None
   prediction: torch.FloatTensor = None
+  rl_features: Optional[dict] = None
   past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
   hidden_states: Optional[Tuple[torch.FloatTensor]] = None
   attentions: Optional[Tuple[torch.FloatTensor]] = None
@@ -210,6 +211,7 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
         seqlens_in_batch: Optional[torch.LongTensor] = None,
         dpo_forward: bool = False,
         inference: Optional[bool] = False,
+        return_rl_features: Optional[bool] = False,
         output_hidden_states: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
@@ -276,6 +278,16 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
         )
 
         action_output = outputs.hidden_states[-1][output_mask]
+        rl_features = {}
+        if return_rl_features:
+          assert raw_proprio_inputs is not None, "return_rl_features requires raw_proprio_inputs"
+          batch_size = raw_proprio_inputs.shape[0]
+          h_in = action_output.reshape(
+            batch_size,
+            action_output.shape[0] // batch_size,
+            action_output.shape[1],
+          )
+          rl_features["h_in"] = h_in.detach()
 
         if inference:
             action_output = self.get_traj_decoder().inference(
@@ -292,7 +304,8 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
               memory=outputs.hidden_states[-1],
               # memory_mask=attention_mask,
               memory_mask=traj_decoder_mask,
-              return_kl=True
+              return_kl=True,
+              return_rl_features=return_rl_features,
             )
         else:
           action_output = self.get_traj_decoder()(
@@ -309,7 +322,13 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
             memory=outputs.hidden_states[-1],
             # memory_mask=attention_mask,
             memory_mask=traj_decoder_mask,
+            return_rl_features=return_rl_features,
           )
+
+        if return_rl_features and "rl_features" in action_output:
+          for key, value in action_output["rl_features"].items():
+            if value is not None:
+              rl_features[key] = value.detach()
 
         preds_ = []
         if raw_action_labels is not None:
@@ -327,6 +346,8 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
         raw_action_mask_list = []
         
         outputs.prediction = action_output["pred"]
+        if return_rl_features:
+          outputs.rl_features = rl_features
         
         label_index_multipler = 1
         if self.config.sep_query_token:
@@ -637,6 +658,7 @@ class LlavaLlamaModel(LlavaMetaModel, LlavaMetaForCausalLM, PreTrainedModel):
             kl_loss=KL_loss,
             logits=outputs.logits,
             prediction=outputs.prediction,
+            rl_features=rl_features if return_rl_features else None,
             raw_action_labels=raw_action_labels,
             raw_action_masks=raw_action_masks,
             past_key_values=outputs.past_key_values,

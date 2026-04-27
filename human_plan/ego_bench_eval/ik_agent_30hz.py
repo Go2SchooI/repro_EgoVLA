@@ -179,6 +179,7 @@ from transformers import HfArgumentParser
 from human_plan.vila_train.args import (
   VLATrainingArguments, VLAModelArguments, VLADataArguments
 )
+from human_plan.ego_bench_eval.rl.config import add_rl_args, build_rl_config
 
 from collections import deque
 from omni.isaac.lab.app import AppLauncher
@@ -214,6 +215,7 @@ parser.add_argument("--video_saving_path", type=str, default=None, help="video s
 parser.add_argument("--save_frames", type=int, default=0, help="result saving path")
 parser.add_argument("--project_trajs", type=int, default=0, help="result saving path")
 parser.add_argument("--additional_label", type=str, default=None, help="additional_label")
+add_rl_args(parser)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -256,11 +258,23 @@ def main():
     task_args.device = _canonicalize_cuda_device(task_args.device)
     os.environ["EGO_VLA_EVAL_DEVICE"] = task_args.device
     eval_device = torch.device(task_args.device)
+    rl_config = build_rl_config(task_args)
+
+    if rl_config.enabled:
+      print(f"rl_config {rl_config}", flush=True)
+      if rl_config.mode == "offline_rl":
+        from human_plan.ego_bench_eval.rl.train_loop import offline_rl_from_config
+        offline_rl_from_config(rl_config, eval_device)
+        return
 
     model, tokenizer, model_args, data_args, training_args = load_model_eval(
       model_args, data_args, training_args
     )
     model.to(eval_device)
+    if rl_config.enabled and rl_config.freeze_egovla:
+      model.eval()
+      for param in model.parameters():
+        param.requires_grad_(False)
 
     data_args.sep_query_token = model_args.sep_query_token
 
@@ -374,6 +388,131 @@ def main():
     ])
 
     padding = 0
+    rl_all_successes = []
+
+    rl_enabled = rl_config.enabled
+    rl_replay = None
+    rl_agent = None
+    rl_action_normalizer = None
+    rl_actor_obs_normalizer = None
+    rl_critic_obs_normalizer = None
+    rl_priv_adapter = None
+    rl_metrics = {}
+    if rl_enabled:
+      from human_plan.ego_bench_eval.rl.action_space import (
+        ActionNormalizer,
+        build_base_chunk,
+        denormalize_action,
+        pack_action,
+        postprocess_action,
+        unpack_action,
+      )
+      from human_plan.ego_bench_eval.rl.features import (
+        VectorNormalizer,
+        build_actor_obs,
+        make_fast_fields,
+        make_raw_fields,
+      )
+      from human_plan.ego_bench_eval.rl.privileged_state import PrivilegedStateAdapter
+      from human_plan.ego_bench_eval.rl.replay_buffer import RLReplayBuffer
+      from human_plan.ego_bench_eval.rl.sac import SACRefBC, save_split_checkpoints
+
+      rl_action_normalizer = ActionNormalizer.identity()
+      if rl_config.load_rl_checkpoint_path and os.path.exists(rl_config.load_rl_checkpoint_path):
+        rl_agent, rl_action_normalizer, rl_ckpt_metadata = SACRefBC.load(
+          rl_config.load_rl_checkpoint_path, rl_config, eval_device
+        )
+        rl_actor_obs_normalizer = VectorNormalizer.from_state(
+          rl_ckpt_metadata.get("actor_obs_normalizer")
+        )
+        rl_critic_obs_normalizer = VectorNormalizer.from_state(
+          rl_ckpt_metadata.get("critic_obs_normalizer")
+        )
+        print(f"rl_loaded_checkpoint path={rl_config.load_rl_checkpoint_path}", flush=True)
+      elif rl_config.action_normalizer_path and os.path.exists(rl_config.action_normalizer_path):
+        try:
+          action_norm_state = torch.load(rl_config.action_normalizer_path, map_location="cpu", weights_only=False)
+        except TypeError:
+          action_norm_state = torch.load(rl_config.action_normalizer_path, map_location="cpu")
+        rl_action_normalizer = ActionNormalizer.from_state(action_norm_state)
+      elif rl_config.replay_path and os.path.exists(rl_config.replay_path) and rl_config.mode in ("online_rl", "eval_rl"):
+        replay_for_stats = RLReplayBuffer.load(rl_config.replay_path)
+        rl_action_normalizer = ActionNormalizer.from_state(
+          replay_for_stats.metadata.get("action_normalizer")
+        )
+        rl_actor_obs_normalizer = VectorNormalizer.from_state(
+          replay_for_stats.metadata.get("actor_obs_normalizer")
+        )
+        rl_critic_obs_normalizer = VectorNormalizer.from_state(
+          replay_for_stats.metadata.get("critic_obs_normalizer")
+        )
+      if rl_config.mode == "eval_rl":
+        if not rl_config.load_rl_checkpoint_path:
+          raise ValueError("rl.mode=eval_rl requires --rl_load_rl_checkpoint_path")
+        if rl_agent is None:
+          raise FileNotFoundError(f"RL checkpoint not found: {rl_config.load_rl_checkpoint_path}")
+        if rl_actor_obs_normalizer is None:
+          raise ValueError("rl.mode=eval_rl checkpoint is missing actor_obs_normalizer")
+
+      if rl_config.mode in ("collect_base", "online_rl"):
+        if rl_config.replay_path and os.path.exists(rl_config.replay_path) and os.path.getsize(rl_config.replay_path) > 0:
+          rl_replay = RLReplayBuffer.load(rl_config.replay_path)
+          print(f"rl_loaded_replay path={rl_config.replay_path} size={len(rl_replay)} mode={rl_config.mode}", flush=True)
+        else:
+          if rl_config.replay_path and os.path.exists(rl_config.replay_path):
+            print(f"[WARN] Ignoring empty replay file: {rl_config.replay_path}", flush=True)
+          rl_replay = RLReplayBuffer(rl_config.replay_capacity)
+      rl_priv_adapter = PrivilegedStateAdapter(env)
+
+    def _rl_append_transition(prev_ctx, next_ctx, reward, done, success, timeout):
+      raw_fields = make_raw_fields(
+        h_in=prev_ctx["h_in"],
+        h_preout=prev_ctx.get("h_preout"),
+        proprio=prev_ctx["proprio"],
+        base_chunk=prev_ctx["base_chunk"],
+        a_ref=prev_ctx["a_ref"],
+        priv_state=prev_ctx["priv_state"],
+        a_exec=prev_ctx["a_exec"],
+        reward=reward,
+        done=done,
+        success=success,
+        timeout=timeout,
+        next_h_in=next_ctx["h_in"],
+        next_h_preout=next_ctx.get("h_preout"),
+        next_proprio=next_ctx["proprio"],
+        next_base_chunk=next_ctx["base_chunk"],
+        next_a_ref=next_ctx["a_ref"],
+        next_priv_state=next_ctx["priv_state"],
+      )
+      fast_fields, fast_meta = make_fast_fields(
+        raw_fields,
+        rl_action_normalizer,
+        rl_config.chunk_summary_type,
+        rl_config.chunk_summary_steps,
+        rl_config.feature_hook,
+        rl_actor_obs_normalizer,
+        rl_critic_obs_normalizer,
+      )
+      actor_action_dim = int(prev_ctx["a_ref"].shape[0])
+      rl_replay.append(raw_fields, fast_fields)
+      rl_replay.metadata.update({
+        "action_dim": actor_action_dim,
+        "actor_action_dim": actor_action_dim,
+        "a_ref_parts": ["left_ee", "right_ee", "left_hand", "right_hand"],
+        "action_normalizer": rl_action_normalizer.state_dict(),
+        "actor_obs_normalizer": (
+          rl_actor_obs_normalizer.state_dict() if rl_actor_obs_normalizer is not None else None
+        ),
+        "critic_obs_normalizer": (
+          rl_critic_obs_normalizer.state_dict() if rl_critic_obs_normalizer is not None else None
+        ),
+        "chunk_summary_type": rl_config.chunk_summary_type,
+        "chunk_summary_steps": tuple(rl_config.chunk_summary_steps),
+        "feature_hook": rl_config.feature_hook,
+        "fast_field_shapes": fast_meta,
+        "privileged_state": rl_priv_adapter.metadata() if rl_priv_adapter is not None else {},
+      })
+      return raw_fields, fast_fields, fast_meta
 
     # with torch.inference_mode():
     for episode_idx in episode_list:
@@ -481,6 +620,8 @@ def main():
         count = padding
 
         result = False
+        rl_pending_transition = None
+        rl_episode_success_values = []
         from human_plan.ego_bench_eval.utils import TASK_MAX_HORIZON
         max_horizon = TASK_MAX_HORIZON[task_args.task]
         print(
@@ -521,25 +662,33 @@ def main():
 
           raw_data_dict.update(raw_proprio_inputs)
           with torch.inference_mode():
-            action_dict = ik_eval_single_step(
-                raw_data_dict,
-                model, tokenizer,
-            )
+            if rl_enabled:
+              action_dict = ik_eval_single_step(
+                  raw_data_dict,
+                  model, tokenizer,
+                  return_rl_features=True,
+              )
+            else:
+              action_dict = ik_eval_single_step(
+                  raw_data_dict,
+                  model, tokenizer,
+              )
 
           from human_plan.ego_bench_eval.utils import smooth_action, repeat_action
-          action_hist_right_ee.append(
-            repeat_action(action_dict["right_ee_pose"], data_args.future_index)
-          )
-          action_hist_left_ee.append(
-            repeat_action(action_dict["left_ee_pose"], data_args.future_index)
-          )
+          repeated_right_ee = repeat_action(action_dict["right_ee_pose"], data_args.future_index)
+          repeated_left_ee = repeat_action(action_dict["left_ee_pose"], data_args.future_index)
+          repeated_left_hand = repeat_action(action_dict["left_qpos_multi_step"], data_args.future_index)
+          repeated_right_hand = repeat_action(action_dict["right_qpos_multi_step"], data_args.future_index)
+          if rl_enabled:
+            assert repeated_right_ee.shape[0] == hist_len
+            assert repeated_left_ee.shape[0] == hist_len
+            assert repeated_left_hand.shape[0] == hist_len
+            assert repeated_right_hand.shape[0] == hist_len
+          action_hist_right_ee.append(repeated_right_ee)
+          action_hist_left_ee.append(repeated_left_ee)
 
-          action_hist_left_hand.append(
-            repeat_action(action_dict["left_qpos_multi_step"], data_args.future_index)
-          )
-          action_hist_right_hand.append(
-            repeat_action(action_dict["right_qpos_multi_step"], data_args.future_index)
-          )
+          action_hist_left_hand.append(repeated_left_hand)
+          action_hist_right_hand.append(repeated_right_hand)
 
           action_left_ee = smooth_action(
             hist_len, task_args.smooth_weight, action_hist_left_ee
@@ -555,6 +704,133 @@ def main():
           action_right_hand = smooth_action(
             hist_len, task_args.hand_smooth_weight, action_hist_right_hand
           )
+
+          if rl_enabled:
+            assert action_left_ee.shape == (7,)
+            assert action_right_ee.shape == (7,)
+            assert action_left_hand.shape == (12,)
+            assert action_right_hand.shape == (12,)
+            base_chunk = build_base_chunk(action_dict)
+            a_ref = pack_action(
+              action_left_ee,
+              action_right_ee,
+              action_left_hand,
+              action_right_hand,
+            )
+            rl_features = action_dict.get("rl_features", {})
+            h_in = rl_features.get("h_in")
+            h_preout = rl_features.get("h_preout")
+            if h_in is None:
+              raise RuntimeError("RL enabled but h_in feature hook is missing")
+            actor_feature = h_in
+            if rl_config.feature_hook == "pre_output":
+              if h_preout is None:
+                raise RuntimeError("rl.feature_hook=pre_output but h_preout is missing")
+              actor_feature = h_preout
+            actor_obs, actor_obs_meta = build_actor_obs(
+              actor_feature,
+              raw_data_dict["proprio_input"],
+              base_chunk,
+              a_ref,
+              rl_action_normalizer,
+              rl_config.chunk_summary_type,
+              rl_config.chunk_summary_steps,
+            )
+            if rl_actor_obs_normalizer is not None:
+              actor_obs = rl_actor_obs_normalizer.normalize(actor_obs)
+            priv_state, priv_meta = rl_priv_adapter.build(env_results[0])
+            rl_curr_ctx = {
+              "h_in": h_in,
+              "h_preout": h_preout,
+              "proprio": raw_data_dict["proprio_input"],
+              "base_chunk": base_chunk,
+              "a_ref": a_ref,
+              "actor_obs": actor_obs,
+              "actor_obs_meta": actor_obs_meta,
+              "priv_state": priv_state,
+              "priv_meta": priv_meta,
+            }
+            if rl_replay is not None and rl_pending_transition is not None:
+              _rl_append_transition(
+                rl_pending_transition["ctx"],
+                rl_curr_ctx,
+                rl_pending_transition["reward"],
+                rl_pending_transition["done"],
+                rl_pending_transition["success"],
+                rl_pending_transition["timeout"],
+              )
+              rl_pending_transition = None
+
+            if rl_config.mode in ("eval_rl", "online_rl"):
+              if rl_agent is None:
+                if rl_config.mode == "eval_rl":
+                  raise RuntimeError("eval_rl must use a loaded RL checkpoint")
+                rl_agent = SACRefBC(
+                  actor_obs_dim=actor_obs.shape[0],
+                  critic_obs_dim=priv_state.shape[0],
+                  action_dim=a_ref.shape[0],
+                  cfg=rl_config,
+                  device=eval_device,
+                  ref_obs_slice=actor_obs_meta.get("ref_obs_slice"),
+                )
+                print(
+                  f"rl_initialized_random actor_obs_dim={actor_obs.shape[0]} critic_obs_dim={priv_state.shape[0]} actor_action_dim={a_ref.shape[0]}",
+                  flush=True,
+                )
+              deterministic = rl_config.mode == "eval_rl" and rl_config.deterministic_eval
+              a_exec_norm = rl_agent.act(actor_obs, deterministic=deterministic)
+              a_exec_norm = np.clip(
+                a_exec_norm,
+                -float(rl_config.action_norm_clip),
+                float(rl_config.action_norm_clip),
+              )
+              a_exec = denormalize_action(a_exec_norm, rl_action_normalizer)
+              a_exec = postprocess_action(a_exec, a_ref, env=env)
+            else:
+              a_exec = a_ref.copy()
+            a_exec_parts = unpack_action(a_exec)
+            action_left_ee = a_exec_parts["left_ee"]
+            action_right_ee = a_exec_parts["right_ee"]
+            action_left_hand = a_exec_parts["left_hand"]
+            action_right_hand = a_exec_parts["right_hand"]
+            rl_curr_ctx["a_exec"] = a_exec
+            if rl_config.debug_dump_shapes or rl_config.mode == "debug_trace_action_path":
+              rl_curr_ctx["debug_shapes"] = {
+                "raw_pred.shape": tuple(np.asarray(action_dict["pred"]).shape),
+                "h_in.shape": tuple(np.asarray(h_in).shape),
+                "h_preout.shape": tuple(np.asarray(h_preout).shape) if h_preout is not None else None,
+                "base_chunk.shape": tuple(base_chunk.shape),
+                "action_dict_shapes": {
+                  key: tuple(np.asarray(action_dict[key]).shape)
+                  for key in (
+                    "left_ee_pose",
+                    "right_ee_pose",
+                    "left_qpos_multi_step",
+                    "right_qpos_multi_step",
+                  )
+                },
+                "repeated_shapes": {
+                  "left_ee": tuple(repeated_left_ee.shape),
+                  "right_ee": tuple(repeated_right_ee.shape),
+                  "left_hand": tuple(repeated_left_hand.shape),
+                  "right_hand": tuple(repeated_right_hand.shape),
+                },
+                "smooth_action_shapes": {
+                  "left_ee": tuple(action_left_ee.shape),
+                  "right_ee": tuple(action_right_ee.shape),
+                  "left_hand": tuple(action_left_hand.shape),
+                  "right_hand": tuple(action_right_hand.shape),
+                },
+                "packed_a_ref.shape": tuple(a_ref.shape),
+                "a_exec_matches_a_ref": bool(np.allclose(a_exec, a_ref)),
+                "a_exec_postprocessed": bool(rl_config.mode in ("eval_rl", "online_rl")),
+                "actor_obs.shape": tuple(actor_obs.shape),
+                "priv_state.shape": tuple(priv_state.shape),
+                "base_chunk_summary.shape": tuple(actor_obs_meta["base_chunk_summary_shape"]),
+                "critic_obs_keys": priv_meta["keys"],
+                "critic_obs_schema_hash": priv_meta["schema_hash"],
+                "env_num_actions": int(env.num_actions),
+              }
 
           ik_step(
               env,
@@ -575,7 +851,101 @@ def main():
 
               action
           )
+          if rl_enabled:
+            assert action.shape == (env.scene.num_envs, env.num_actions), (
+              f"env action tensor shape {tuple(action.shape)} expected {(env.scene.num_envs, env.num_actions)}"
+            )
           env_results = env.step(action)
+
+          if rl_enabled:
+            success = env_results[0]["success"].sum().item() == 1
+            timeout = (i + 1) >= max_horizon
+            reward = 1.0 if success else 0.0
+            done = bool(success or timeout)
+            rl_episode_success_values.append(float(success))
+            if rl_replay is not None:
+              if done:
+                _rl_append_transition(
+                  rl_curr_ctx,
+                  rl_curr_ctx,
+                  reward,
+                  done,
+                  success,
+                  timeout,
+                )
+              else:
+                rl_pending_transition = {
+                  "ctx": rl_curr_ctx,
+                  "reward": reward,
+                  "done": done,
+                  "success": success,
+                  "timeout": timeout,
+                }
+
+            if rl_config.mode == "online_rl" and rl_replay is not None and len(rl_replay) >= rl_config.min_replay_size:
+              if rl_agent is None:
+                raise RuntimeError("online_rl has replay samples but no RL agent")
+              for _ in range(rl_config.updates_per_env_step):
+                batch = rl_replay.sample_batch(rl_config.batch_size, eval_device)
+                rl_metrics = rl_agent.update(batch)
+              if i % 25 == 0:
+                success_rate = float(np.mean(rl_episode_success_values)) if rl_episode_success_values else 0.0
+                print(
+                  "online_rl_update "
+                  + " ".join(f"{key}={value:.5g}" for key, value in rl_metrics.items())
+                  + f" success_rate={success_rate:.5g} replay_size={len(rl_replay)}",
+                  flush=True,
+                )
+
+            if rl_config.mode == "debug_trace_action_path":
+              debug_raw = make_raw_fields(
+                h_in=rl_curr_ctx["h_in"],
+                h_preout=rl_curr_ctx.get("h_preout"),
+                proprio=rl_curr_ctx["proprio"],
+                base_chunk=rl_curr_ctx["base_chunk"],
+                a_ref=rl_curr_ctx["a_ref"],
+                priv_state=rl_curr_ctx["priv_state"],
+                a_exec=rl_curr_ctx["a_exec"],
+                reward=reward,
+                done=done,
+                success=success,
+                timeout=timeout,
+                next_h_in=rl_curr_ctx["h_in"],
+                next_h_preout=rl_curr_ctx.get("h_preout"),
+                next_proprio=rl_curr_ctx["proprio"],
+                next_base_chunk=rl_curr_ctx["base_chunk"],
+                next_a_ref=rl_curr_ctx["a_ref"],
+                next_priv_state=rl_curr_ctx["priv_state"],
+              )
+              debug_fast, debug_meta = make_fast_fields(
+                debug_raw,
+                rl_action_normalizer,
+                rl_config.chunk_summary_type,
+                rl_config.chunk_summary_steps,
+                rl_config.feature_hook,
+                rl_actor_obs_normalizer,
+                rl_critic_obs_normalizer,
+              )
+              debug_shapes = dict(rl_curr_ctx.get("debug_shapes", {}))
+              debug_shapes["env_action_tensor.shape"] = tuple(action.shape)
+              debug_shapes["success"] = bool(success)
+              debug_shapes["timeout"] = bool(timeout)
+              debug_path = Path(rl_config.save_debug_transition_path)
+              if str(debug_path.parent) not in ("", "."):
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+              torch.save(
+                {
+                  "shapes": debug_shapes,
+                  "raw": debug_raw,
+                  "fast": debug_fast,
+                  "fast_meta": debug_meta,
+                  "privileged_state_meta": rl_curr_ctx["priv_meta"],
+                },
+                debug_path,
+              )
+              print(f"rl_debug_trace_saved path={rl_config.save_debug_transition_path} shapes={debug_shapes}", flush=True)
+              result = bool(success)
+              break
 
           # Success 
           if env_results[0]["success"].sum().item() == 1:
@@ -627,10 +997,55 @@ def main():
                 subtask_string += f"{key}: {env_results[0][key].sum().item()} "
             subtask_string += "\n"
             f.write(subtask_string)
+        if rl_enabled:
+          rl_all_successes.append(float(result))
         
         out.release()
         _convert_video_to_h264(output_path)
         # close the simulator
+    if rl_enabled:
+      success_rate = float(np.mean(rl_all_successes)) if rl_all_successes else 0.0
+      print(f"rl_rollout_done mode={rl_config.mode} success_rate={success_rate:.5g}", flush=True)
+      if rl_replay is not None and len(rl_replay) > 0:
+        if rl_config.mode == "collect_base":
+          rl_action_normalizer = rl_replay.fit_action_normalizer(clip=rl_config.action_norm_clip)
+          rl_actor_obs_normalizer, rl_critic_obs_normalizer = rl_replay.fit_obs_normalizers(
+            rl_action_normalizer,
+            rl_config.chunk_summary_type,
+            rl_config.chunk_summary_steps,
+            rl_config.feature_hook,
+            clip=rl_config.obs_norm_clip,
+          )
+          rl_replay.rebuild_fast_fields(
+            rl_action_normalizer,
+            rl_config.chunk_summary_type,
+            rl_config.chunk_summary_steps,
+            rl_config.feature_hook,
+            rl_actor_obs_normalizer,
+            rl_critic_obs_normalizer,
+          )
+          if rl_config.action_normalizer_path:
+            action_norm_path = Path(rl_config.action_normalizer_path)
+            if str(action_norm_path.parent) not in ("", "."):
+              action_norm_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(rl_action_normalizer.state_dict(), rl_config.action_normalizer_path)
+        rl_replay.save(rl_config.replay_path)
+        print(f"rl_replay_saved path={rl_config.replay_path} size={len(rl_replay)}", flush=True)
+      if rl_agent is not None and rl_config.mode in ("online_rl", "eval_rl"):
+        checkpoint_path = rl_config.save_rl_checkpoint_path
+        if checkpoint_path and rl_config.mode == "online_rl":
+          rl_agent.save(
+            checkpoint_path,
+            action_normalizer=rl_action_normalizer,
+            actor_obs_normalizer=rl_actor_obs_normalizer,
+            critic_obs_normalizer=rl_critic_obs_normalizer,
+            metadata={
+              "success_rate": success_rate,
+              "replay_path": rl_config.replay_path,
+            },
+          )
+          save_split_checkpoints(rl_agent, rl_config.actor_checkpoint_path, rl_config.critic_checkpoint_path)
+          print(f"rl_checkpoint_saved path={checkpoint_path}", flush=True)
     env.close()
 
 if __name__ == "__main__":

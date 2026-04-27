@@ -654,15 +654,24 @@ from llava.model.language_model.rotation_convert import rot6d_to_rotmat, batch_a
 def ik_eval_single_step(
   raw_data_dict,
   model, tokenizer,
+  return_rl_features=False,
 ):
   results = eval_single_sample(
     raw_data_dict,
     tokenizer, model,
     image_width=raw_data_dict["raw_width"],
-    image_height=raw_data_dict["raw_height"]
+    image_height=raw_data_dict["raw_height"],
+    return_rl_features=return_rl_features,
   )
 
-  pred, result_img, action_labels, action_masks, loss = results
+  if return_rl_features:
+    pred, result_img, action_labels, action_masks, loss, rl_features = results
+  else:
+    pred, result_img, action_labels, action_masks, loss = results
+    rl_features = None
+
+  assert pred.ndim == 2, f"pred.ndim must be 2, got {pred.shape}"
+  assert pred.shape[-1] == 48, f"current EgoVLA sim eval expects pred shape (T,48), got {pred.shape}"
 
   # N, 2, 2
   # pred_2d = pred[:, :4]
@@ -720,7 +729,7 @@ def ik_eval_single_step(
     pred_rotmat[:, 1, :], pred_3d[:, 1, :], is_right=True
   )
 
-  return dict(
+  output_dict = dict(
     left_ee_pose = left_ee_pose,
     right_ee_pose = right_ee_pose,
     left_qpos = left_qpos,
@@ -729,5 +738,9 @@ def ik_eval_single_step(
     right_qpos_multi_step = right_qpos_multi_step,
     left_ee_trans_cam = pred_3d[:, 0, :],
     right_ee_trans_cam = pred_3d[:, 1, :],
-    pred_3d = pred_3d 
+    pred_3d = pred_3d,
+    pred = pred,
   )
+  if return_rl_features:
+    output_dict["rl_features"] = rl_features or {}
+  return output_dict

@@ -449,6 +449,36 @@ Recommended helper:
 build_priv_state(env, obs_dict) -> np.ndarray
 ```
 
+Because IsaacSim/IsaacLab APIs change quickly across versions, implementation must use the API actually installed in the local `egovla-sim` environment and the local benchmark extension source. Do not copy privileged-state calls from another IsaacSim/IsaacLab version, tutorials, or remote docs without verifying them locally first.
+
+Before writing privileged-state code, the implementation pass should:
+
+- Inspect the local benchmark files under `/root/gpufree-data/IsaacLab/Ego_Humanoid_Manipulation_Benchmark/source/extensions/humanoid.tasks`.
+- Run or extend the existing eval/smoke path to print the real local `env`, `env.scene`, `env.robot`, `env.robot.data`, `obs_dict`, and task-object attributes needed by the critic.
+- Prefer fields already returned by the local `env.step(...)` observation dict.
+- Only add direct simulator/task-object reads after confirming that those exact attributes exist in the local runtime.
+- Avoid imports or method calls that only exist in newer/older IsaacLab releases unless guarded by a local version/attribute check and a tested fallback.
+
+Do not let critic code directly depend on scattered simulator internals. Put all privileged-state access behind a small adapter:
+
+```python
+class PrivilegedStateAdapter:
+    def __init__(self, env):
+        ...
+
+    def build(self, obs_dict) -> tuple[np.ndarray, dict]:
+        ...
+```
+
+The adapter should:
+
+- Prefer stable observation fields already returned by `env.step`, such as `qpos`, `qvel`, `action`, EE poses, fingertip positions, and contact forces.
+- Access task/object internals only through guarded `hasattr`/`getattr` blocks.
+- Be implemented against the local installed IsaacSim/IsaacLab API, verified by a local smoke/debug run before RL collection.
+- Record `isaacsim`/`isaaclab` version metadata when available.
+- Save the exact included key list, tensor shapes, dtypes, and flatten order with replay metadata.
+- Fail loudly in training if the loaded replay schema does not match the current adapter schema.
+
 Include:
 
 - `qpos`
@@ -466,7 +496,7 @@ Exclude:
 - success/progress labels from critic input in v1: keys containing `success`
 - reward/done fields
 
-Flatten all included tensors for env 0 and concatenate. Save the included key list with the replay/normalization metadata so offline replay shape is reproducible.
+Flatten all included tensors for env 0 and concatenate. Save the included key list with the replay/normalization metadata so offline replay shape is reproducible. For the first single-task version, prefer a conservative critic state built mostly from `obs_dict` rather than directly reaching into task-specific simulator objects; add task-specific object state only after a debug trace confirms the fields are stable in the active IsaacSim/IsaacLab environment.
 
 ## 7. Replay Buffer Design
 
@@ -736,6 +766,7 @@ Risk points:
 - Feature tensors must be detached; EgoVLA must receive no RL gradients.
 - `proprio_input` dim depends on `data_args.input_hand_dof`; derive at runtime.
 - Privileged critic obs must have a saved key list and fixed flatten order; otherwise offline replay becomes non-reproducible.
+- IsaacSim/IsaacLab APIs are version-sensitive. Implementation must verify the local installed API before writing privileged-state access, keep that access inside `PrivilegedStateAdapter`, prefer stable `obs_dict` fields, guard task/object internals, and save version/schema metadata with every replay.
 - Success labels should be used for reward/done, not included in critic obs by default.
 - Keep all new behavior config-gated and disabled by default.
 
@@ -761,6 +792,9 @@ h_preout_shape if available
 proprio_shape
 actor_obs_shape
 critic_obs_shape
+critic_obs_keys
+critic_obs_schema_hash
+isaac_version_metadata if available
 env_num_actions
 env_action_shape
 success

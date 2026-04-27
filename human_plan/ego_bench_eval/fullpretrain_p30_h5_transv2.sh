@@ -152,4 +152,5 @@ echo "Using checkpoint: $CHECKPOINT_PATH"
     --project_trajs "$PROJ_TRAJS" \
     --hand_smooth_weight "$HAND_SMOOTH_WEIGHT" \
     --video_saving_path "$video_saving_path" \
-    --additional_label "$additional_label"
+    --additional_label "$additional_label" \
+    "${@:14}"

@@ -30,6 +30,7 @@ def eval_single_sample(
   model,
   image_width=EPIC_KITCHEN_WIDTH,
   image_height=EPIC_KITCHEN_HEIGHT,
+  return_rl_features=False,
 ):
   data_dict = {}
   data_dict["images"] = raw_data_dict["image"].to(model.dtype).to(model.device)
@@ -55,10 +56,19 @@ def eval_single_sample(
 
   with torch.inference_mode():
       # with torch.eval():
-      output = model.forward(**data_dict)
+      output = model.forward(**data_dict, return_rl_features=return_rl_features)
   # print(output.prediction)
-  return output.prediction.cpu().numpy(), \
+  result = (
+    output.prediction.cpu().numpy(),
     raw_data_dict["raw_image_obs"], \
     raw_data_dict["raw_action_label"].cpu().numpy(), \
     raw_data_dict["raw_action_mask"].cpu().numpy(), \
     output.loss.item()
+  )
+  if return_rl_features:
+    rl_features = {}
+    for key, value in (getattr(output, "rl_features", None) or {}).items():
+      if value is not None:
+        rl_features[key] = value.detach().float().cpu()
+    result = result + (rl_features,)
+  return result

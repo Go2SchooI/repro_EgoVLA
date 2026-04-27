@@ -177,4 +177,6 @@ video_output
 .DS_Store
 ._*
 
-mano_v1_2/
+mano_v1_2
+
+rl_runs

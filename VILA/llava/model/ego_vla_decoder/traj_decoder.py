@@ -45,12 +45,14 @@ class TrajDecoder(PreTrainedModel):
     input_dict=None,
     memory=None,
     memory_mask=None,
+    return_rl_features=False,
   ):
     if self.config.traj_decoder_type == "transformer_split_action_v2":
       return self.decoder(
         latent, input_dict, 
         memory=memory,
         memory_mask=memory_mask,
+        return_rl_features=return_rl_features,
       )
     else:
       return self.decoder(
@@ -63,14 +65,16 @@ class TrajDecoder(PreTrainedModel):
     input_dict=None,
     memory=None,
     memory_mask=None,
-    return_kl=False
+    return_kl=False,
+    return_rl_features=False,
   ):
     if self.config.traj_decoder_type == "transformer_split_action_v2":
       return self.decoder.inference(
         latent, input_dict, 
         memory=memory,
         memory_mask=memory_mask,
-        return_kl=return_kl
+        return_kl=return_kl,
+        return_rl_features=return_rl_features,
       )
     else: 
       return self.decoder.inference(
